@@ -30,13 +30,16 @@ jobs:
           echo "Building cloud with clawmetry==$VERSION"
 
       - name: Checkout cloud repo
+        id: checkout_cloud
         uses: actions/checkout@v4
+        continue-on-error: true
         with:
           repository: vivekchand/clawmetry-cloud
           token: ${{ secrets.CLOUD_REPO_PAT }}
           path: clawmetry-cloud
 
       - name: Pin clawmetry version in cloud Dockerfile
+        if: steps.checkout_cloud.outcome == 'success'
         run: |
           cd clawmetry-cloud
           # Update pin (handles both pinned and unpinned)
@@ -48,6 +51,7 @@ jobs:
           grep clawmetry Dockerfile
 
       - name: Commit version bump if changed
+        if: steps.checkout_cloud.outcome == 'success'
         run: |
           cd clawmetry-cloud
           git config user.email "diya-bot@clawmetry.com"
@@ -58,16 +62,19 @@ jobs:
           git push
 
       - name: Authenticate to Google Cloud
+        if: steps.checkout_cloud.outcome == 'success'
         uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
 
       - name: Set up Cloud SDK
+        if: steps.checkout_cloud.outcome == 'success'
         uses: google-github-actions/setup-gcloud@v2
         with:
           project_id: openclaw-mc
 
       - name: Deploy to Cloud Run
+        if: steps.checkout_cloud.outcome == 'success'
         run: |
           cd clawmetry-cloud
           gcloud run deploy clawmetry-cloud \
@@ -77,3 +84,8 @@ jobs:
             --allow-unauthenticated \
             --quiet
           echo "✅ Cloud deployed with clawmetry==${{ steps.oss_version.outputs.version }}"
+
+      - name: Warn when cloud deploy is skipped
+        if: steps.checkout_cloud.outcome != 'success'
+        run: |
+          echo "::warning::Skipping cloud auto-deploy because the cloud repo checkout failed. Verify CLOUD_REPO_PAT access to vivekchand/clawmetry-cloud."
