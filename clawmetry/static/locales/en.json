@@ -951,6 +951,7 @@
   "needs.n_working": "{n} agents working",
   "needs.never_asks": "{runtime} never asks for permission, so nothing here waits on you.",
   "needs.none_running": "No agents running",
+  "needs.none_running_runtime": "No {runtime} agents running",
   "needs.one_waiting": "1 agent needs you",
   "needs.one_quiet": "1 agent is open but has gone quiet",
   "needs.n_quiet": "{n} agents are open but have gone quiet",

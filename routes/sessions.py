@@ -532,9 +532,59 @@ def api_live_sessions():
         "working": sum(1 for s in live if s["state"] == "working"),
         "waiting": sum(1 for s in live if s["state"] == "waiting"),
     }
-    return jsonify({"sessions": live[:20], "counts": counts,
-                    "runtime": rt_filter or "all", "available": True,
-                    "_source": "local_store"})
+
+    # Ground truth: the process table. Everything above is inferred from how
+    # recently a transcript was WRITTEN, which is a proxy for "is it working"
+    # and fails in both the ways that matter. An agent mid-tool-call writes
+    # nothing for the length of the call, and the store only knows what the
+    # daemon has ingested. Founder report 2026-10-07: seven Claude Code
+    # processes were running, the newest last_active_at in the store was 6.1
+    # HOURS old, so every session classified "ended", and the hero said
+    # "It's idle right now." over a working machine with the daemon reporting
+    # itself healthy (daemon_age_seconds: 51, fresh: true) the entire time.
+    # "The daemon is alive" is not "the data is current", and we had been
+    # using the first to justify asserting the second.
+    #
+    # So ask the OS. ``live_sessions()`` is pid-backed, costs ~3ms cold and
+    # nothing warm, and carries the runtime, so it can be scoped like the
+    # rows above. When it sees agents the store does not, we KNOW the store
+    # is behind, and the honest answer is "we cannot tell", never "idle".
+    processes_live = None
+    try:
+        from clawmetry import process_control as _pc
+        procs = _pc.live_sessions() or []
+        if rt_filter:
+            procs = [p for p in procs
+                     if str((p or {}).get("runtime") or "").strip().lower() == rt_filter]
+        processes_live = len(procs)
+    except Exception:
+        processes_live = None       # unknown, which is not the same as zero
+
+    evidence_age = None
+    try:
+        ages = [s["age_seconds"] for s in live if s.get("age_seconds") is not None]
+        if ages:
+            evidence_age = int(min(ages))
+    except Exception:
+        evidence_age = None
+
+    # The store says nothing is live while real agent processes exist: our
+    # evidence is demonstrably behind reality, so refuse the realtime claim.
+    contradicted = bool(processes_live) and counts["working"] == 0
+
+    body = {
+        "sessions": live[:20], "counts": counts,
+        "runtime": rt_filter or "all",
+        "available": not contradicted,
+        "realtime": not contradicted,
+        "processes_live": processes_live,
+        "evidence_age_seconds": evidence_age,
+        "_source": "local_store",
+    }
+    if contradicted:
+        # Carry WHY, so the UI can say what is true instead of going quiet.
+        body["reason"] = "evidence_behind_processes"
+    return jsonify(body)
 
 
 def _filter_internal_sessions(rows: list) -> list:

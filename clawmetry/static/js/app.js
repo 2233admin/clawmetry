@@ -2564,7 +2564,17 @@ function cmRenderNeedsYou(d) {
       sub = t('needs.n_quiet', { n: quiet },
               "{n} agents are open but have gone quiet");
     } else {
-      sub = t('needs.none_running', null, 'No agents running');
+      // Scoped, this count covers ONE runtime, so an unqualified "No agents
+      // running" reads as a claim about the machine. Founder report
+      // 2026-10-07: it said exactly that under a Codex filter while a Claude
+      // Code agent ran, with a red CRITICAL banner about that agent directly
+      // above. Name the runtime and the two stop contradicting each other.
+      var _nrRt = (typeof _cmRuntimeFilter === 'function') ? _cmRuntimeFilter() : 'all';
+      var _nrName = (_nrRt && _nrRt !== 'all' && typeof _cmRuntimeLabel === 'function')
+        ? (_cmRuntimeLabel(_nrRt) || '') : '';
+      sub = _nrName
+        ? t('needs.none_running_runtime', { runtime: _nrName }, 'No {runtime} agents running')
+        : t('needs.none_running', null, 'No agents running');
     }
     // Some runtimes have no permission prompt at all (Pi's trust machinery
     // guards loading config, not running tools). Filtered to one of those,
@@ -4809,6 +4819,12 @@ function _cmLoadLiveSessions(cb) {
       rt: rt, ts: Date.now(),
       sessions: (d && d.sessions) || [],
       counts: (d && d.counts) || { working: 0, waiting: 0 },
+      // Ground truth from the process table, and why we may be refusing to
+      // answer. `processes_live` > 0 with nothing live in the store means our
+      // evidence is behind reality, not that the machine is idle.
+      processesLive: (d && typeof d.processes_live === 'number') ? d.processes_live : null,
+      staleReason: (d && d.reason) || '',
+      evidenceAge: (d && typeof d.evidence_age_seconds === 'number') ? d.evidence_age_seconds : null,
       // `available:false` means the daemon could not be reached — that is
       // "we don't know", not "nothing is running", and the hero says so.
       available: !(d && d.available === false)
@@ -4973,25 +4989,58 @@ function _renderOverviewHero() {
 
   // Headline. Say the number and let it carry the news; fall back to the old
   // single-boolean sentence only when the session list can't be read.
+  //
+  // NAME THE RUNTIME WHEN SCOPED. These counts come from
+  // /api/live-sessions?runtime=<id>, so under a filter they describe ONE
+  // runtime while the sentence described the machine. Founder report
+  // 2026-10-07: with the switcher on Codex (genuinely idle) the hero read
+  // "It's idle right now." directly beneath a red CRITICAL banner about a
+  // Claude Code agent that was running at that moment. Both were true and
+  // the screen still contradicted itself, because only one of them said
+  // which runtime it meant. FLYWHEEL section 0a.2 is the rule: a number
+  // shown under a runtime filter either scopes or says it is node-wide,
+  // and a scoped number phrased node-wide breaks it from the other side.
+  // NB: `_scoped` is declared further down, so it is hoisted-but-undefined
+  // here and would silently disable this. Derive it from _liveRt, which is
+  // already in hand.
+  // The endpoint refuses the realtime claim when the process table shows
+  // agents the store has not caught up with. Honour that refusal here: the
+  // recency fallback below would otherwise step in and assert "working"
+  // from the same stale data the endpoint just disowned.
+  var _evidenceBehind = !!(_live && _live.staleReason === 'evidence_behind_processes');
+  var _procsLive = (_live && typeof _live.processesLive === 'number') ? _live.processesLive : null;
+  var _rtScoped = !!(_liveRt && _liveRt !== 'all');
+  var _rtName = (_rtScoped && typeof _cmRuntimeLabel === 'function')
+    ? (_cmRuntimeLabel(_liveRt) || '') : '';
+  var _subject = _rtName || 'It';
+  var _isIt = !_rtName;
   var headline;
   if (_liveKnown && _working > 0) {
     headline = _working === 1
-      ? 'It’s working right now.'
-      : _working + ' sessions are working right now.';
+      ? (_isIt ? 'It’s working right now.' : _subject + ' is working right now.')
+      : _working + (_isIt ? ' sessions are working right now.'
+                          : ' ' + _subject + ' sessions are working right now.');
   } else if (_liveKnown && _waiting > 0) {
     // Age-based only (last output 2-10 min ago), so it cannot claim "waiting
     // on you" — that is the needs-you strip's claim, and it has evidence.
     // Both render on Overview, so a mismatch here is two components
     // contradicting each other on one screen.
     headline = _waiting === 1
-      ? 'One session has gone quiet.'
-      : _waiting + ' sessions have gone quiet.';
+      ? (_isIt ? 'One session has gone quiet.'
+               : 'One ' + _subject + ' session has gone quiet.')
+      : _waiting + (_isIt ? ' sessions have gone quiet.'
+                          : ' ' + _subject + ' sessions have gone quiet.');
+  } else if (_evidenceBehind) {
+    // Say what the OS can prove and nothing more. No "right now".
+    headline = (_procsLive === 1)
+      ? 'One agent is open on this machine.'
+      : _procsLive + ' agents are open on this machine.';
   } else if (!_liveKnown && busy) {
-    headline = 'It’s working right now.';
+    headline = _isIt ? 'It’s working right now.' : _subject + ' is working right now.';
   } else if (!_liveKnown) {
     headline = 'Nothing to report yet.';
   } else {
-    headline = 'It’s idle right now.';
+    headline = _isIt ? 'It’s idle right now.' : _subject + ' is idle right now.';
   }
 
   var _liveRows = _liveKnown ? _cmLiveRowsHtml(_live) : '';
@@ -5038,10 +5087,23 @@ function _renderOverviewHero() {
   var sayText = say && say.text ? String(say.text).replace(/\s+/g, ' ').trim() : '';
   if (sayText.length > 90) sayText = sayText.slice(0, 90) + '…';
 
-  var lastLine = sayText
-    ? 'Last thing it did: replied <strong style="color:var(--text-primary);">“' + escHtml(sayText) + '”</strong>.'
-    : (busy ? 'It’s working on something right now.'
-            : 'Send it a message and you’ll see what it does, right here.');
+  var lastLine;
+  if (_evidenceBehind) {
+    // Name the gap in plain words and in real units, so the reader can judge
+    // it. "It's working on something right now" would be the same unbacked
+    // claim the headline just refused to make.
+    var _evAge = (_live && typeof _live.evidenceAge === 'number') ? _live.evidenceAge : null;
+    var _evTxt = (_evAge === null) ? 'has not caught up yet'
+      : ('is ' + (_evAge >= 3600 ? Math.round(_evAge / 3600) + 'h'
+                                 : Math.max(1, Math.round(_evAge / 60)) + 'm') + ' behind');
+    lastLine = 'Their live status ' + _evTxt
+      + ', so ClawMetry cannot say whether they are working right now.';
+  } else {
+    lastLine = sayText
+      ? 'Last thing it did: replied <strong style="color:var(--text-primary);">“' + escHtml(sayText) + '”</strong>.'
+      : (busy ? 'It’s working on something right now.'
+              : 'Send it a message and you’ll see what it does, right here.');
+  }
   var stats = [];
   // When scoped to a runtime, `sessions` is that runtime's TOTAL footprint
   // (matches the switcher), so don't append "today" — the runtime may have 0
